@@ -23,23 +23,28 @@ class BUSDataset(Dataset):
         self.transforms = transforms
 
     def __getitem__(self, idx):
+        # Get image and mask filenames
         img_name = self.df.iloc[idx]["image"]
         mask_name = self.df.iloc[idx]["mask"]
 
+        # Load image and mask
         img_path = os.path.join(self.img_dir, img_name)
         mask_path = os.path.join(self.mask_dir, mask_name)
 
         img = Image.open(img_path).convert("RGB")
         mask = np.array(Image.open(mask_path))
 
+        # Get object IDs (1=Benign, 2=Malignant)
         obj_ids = np.unique(mask)
-        obj_ids = obj_ids[obj_ids != 0]  # only benign(1) & malignant(2)
+        obj_ids = obj_ids[obj_ids != 0]
 
+        # If no objects, return empty tensors
         if len(obj_ids) == 0:
-            masks = np.zeros((0, mask.shape[0], mask.shape[1]), dtype=np.uint8)
+            masks = torch.zeros((0, mask.shape[0], mask.shape[1]), dtype=torch.uint8)
             boxes = torch.zeros((0, 4), dtype=torch.float32)
             labels = torch.zeros((0,), dtype=torch.int64)
         else:
+            # Create masks and labels for each object
             masks = []
             labels = []
             for obj_id in obj_ids:
@@ -47,36 +52,31 @@ class BUSDataset(Dataset):
                 masks.append(m)
                 labels.append(obj_id)
 
-            masks = np.stack(masks, axis=0)
+            masks = torch.as_tensor(np.stack(masks, axis=0), dtype=torch.uint8)
+            labels = torch.as_tensor(labels, dtype=torch.int64)
 
+            # Compute bounding boxes from masks
             boxes = []
             for m in masks:
                 pos = np.where(m)
                 xmin, xmax = np.min(pos[1]), np.max(pos[1])
                 ymin, ymax = np.min(pos[0]), np.max(pos[0])
                 boxes.append([xmin, ymin, xmax, ymax])
-
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
 
-        masks = torch.as_tensor(masks, dtype=torch.uint8)
-        image_id = int(idx)
-        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if len(boxes) > 0 else torch.tensor([])
-        iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
-
+        # Create target dictionary
         target = {
             "boxes": boxes,
             "labels": labels,
-            "masks": masks,
-            "image_id": image_id,
-            "area": area,
-            "iscrowd": iscrowd,
+            "masks": masks
         }
 
+        # Apply any transforms
         if self.transforms:
             img, target = self.transforms(img, target)
 
         return img, target
+
 
     def __len__(self):
         return len(self.df)
@@ -201,8 +201,8 @@ def evaluate_custom(model, data_loader, device, visualize=False, num_visualize=3
                     plt.pause(2)
                     plt.close(fig)
                     vis_count += 1
-
-    final_results = {cls: {metric: np.mean(vals) if vals else 0
+    class_map = {1: "Benign", 2: "Malignant"}
+    final_results = {class_map.get(cls, f"class_{cls}"): {metric: float(np.mean(vals)) if vals else 0
                            for metric, vals in metrics.items()}
                      for cls, metrics in metrics_per_class.items()}
     return final_results
@@ -242,9 +242,12 @@ def run_cross_validation(csv_path, img_dir, mask_dir, num_classes, num_epochs):
         fold_results.append(metrics)
 
     avg_results = {}
-    for cls in [1,2]:
-        avg_results[f"Class {cls}"] = {metric: np.mean([fold[cls][metric] for fold in fold_results])
-                                        for metric in fold_results[0][cls]}
+    for cls_name in ["Benign", "Malignant"]:
+        avg_results[cls_name] = {
+            metric: float(np.mean([fold[cls_name][metric] for fold in fold_results]))
+            for metric in fold_results[0][cls_name]
+        }
+
     print("\n========== Final Cross-Validation Results ==========")
     print(avg_results)
     return avg_results
